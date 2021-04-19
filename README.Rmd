@@ -1,0 +1,158 @@
+---
+title: "Create your own hexbin shapefiles"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  out.width = "100%",
+  tidy = "styler",
+  dpi = 300,
+  dev = "ragg_png"
+)
+```
+
+## How to create a hexbin grid with R with `geogrid`
+
+A custom example:
+
+```{r}
+
+# Needed libraries
+
+library(USAboundaries)
+library(geogrid)
+library(sf)
+library(dplyr)
+# For plotting only
+library(mapsf)
+
+
+
+
+all <- states_contemporary_lores %>% st_transform(st_crs(3857))
+
+
+
+# Get Mainland only
+
+mainland <- all %>% filter(!state_abbr %in% c("AK", "HI", "PR"))
+
+# Plot and check
+mf_map(mainland) %>%
+  mf_label(var = "state_abbr", overlap = FALSE, halo = TRUE)
+
+
+# Create grid
+# The grid is quite random - parameters that affects:
+# - CRS of the shape
+# - parameters seed and learning rate
+#
+# Play with them to improve the grid
+
+
+
+cells <- calculate_grid(mainland,
+  grid_type = "hexagonal",
+  seed = 50,
+  learning_rate = 0.1
+)
+
+mainland_new <- assign_polygons(mainland, cells)
+
+
+
+mf_map(mainland_new) %>%
+  mf_label(var = "state_abbr", overlap = FALSE, halo = TRUE)
+
+
+# Expand the grid and manually assign values to Hawaii, Alaska and Puerto Rico
+
+marea <- as.double(st_area(mainland_new[1, ]))
+marea <- sqrt((2 * marea) / sqrt(3))
+bbox <- st_bbox(mainland_new)
+maxdist <- max(bbox[3] - bbox[1], bbox[4] - bbox[1]) * 0.05
+
+
+grid <-
+  st_make_grid(
+    st_as_sfc(bbox + c(-maxdist, -maxdist, maxdist, maxdist)),
+    crs = st_crs(mainland),
+    cellsize = marea,
+    square = FALSE
+  )
+
+grid <- st_sf(id = 1:length(grid), geometry = grid)
+
+mf_map(grid) %>% mf_label("id")
+mf_map(mainland_new, col = NA, border = "red", add = TRUE, lwd = 3)
+
+# Align the grids - In this case using WA to 44
+
+init <-
+  grid %>%
+  filter(id == 44) %>%
+  st_centroid() %>%
+  st_coordinates()
+
+end <-
+  mainland_new %>%
+  filter(state_abbr == "WA") %>%
+  st_centroid() %>%
+  st_coordinates()
+
+# Play with the offset!!
+offset <- c(init[1] - end[1], init[2] - end[2])
+
+newgrid <- sf::st_sf(
+  sf::st_drop_geometry(grid),
+  geometry = sf::st_geometry(grid) - offset,
+  crs = sf::st_crs(grid)
+) %>% st_transform(st_crs(mainland_new))
+
+# Now grids should be aligned
+mf_map(newgrid) %>% mf_label("id")
+mf_map(mainland_new, col = NA, border = "red", add = TRUE, lwd = 3)
+
+
+
+
+# Final step - manually assign grids id to Hawaii, Alaska and Puerto Rico
+remain <- all %>%
+  filter(state_abbr %in% c("AK", "HI", "PR")) %>%
+  st_drop_geometry()
+remain$id <- NA
+remain[remain$state_abbr == "AK", "id"] <- 32
+remain[remain$state_abbr == "HI", "id"] <- 34
+remain[remain$state_abbr == "PR", "id"] <- 196
+
+# Get geodata
+remain_sf <- inner_join(newgrid, remain)
+
+# Now paste all together
+result <- bind_rows(mainland_new, remain_sf)
+result <- st_make_valid(result)
+
+
+# Regenerate initial df with new geometries
+df <- st_drop_geometry(all)
+destination <- result[, "state_abbr"]
+result_end <- left_join(destination, df)
+
+mf_map(result_end,col=NA, border = NA)
+mf_map(mainland, col = "brown", add=TRUE)
+mf_map(result_end, add=TRUE, col=adjustcolor("grey50",alpha.f = 0.5)) %>% mf_label("state_abbr", overlap = FALSE)
+
+# Export to gpkg
+# Mercator projection EPSG:3857
+st_crs(result_end)
+
+
+st_write(result_end,"USAhexbin.gpkg", delete_layer = TRUE)
+
+sessionInfo()
+
+```
